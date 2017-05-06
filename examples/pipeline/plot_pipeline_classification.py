@@ -8,18 +8,21 @@ An example of the Pipeline object working with transformers and resamplers.
 
 """
 
-print(__doc__)
+# Authors: Christos Aridas
+#          Guillaume Lemaitre <g.lemaitre58@gmail.com>
+# License: MIT
 
 from sklearn.cross_validation import train_test_split as tts
 from sklearn.datasets import make_classification
 from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsClassifier as KNN
 from sklearn.metrics import classification_report
-
+from sklearn.neighbors import KNeighborsClassifier as KNN
 
 from imblearn.pipeline import make_pipeline
-from imblearn.under_sampling import EditedNearestNeighbours
-from imblearn.under_sampling import RepeatedEditedNearestNeighbours
+from imblearn.under_sampling import (EditedNearestNeighbours,
+                                     RepeatedEditedNearestNeighbours)
+
+print(__doc__)
 
 # Generate the dataset
 X, y = make_classification(n_classes=2, class_sep=1.25, weights=[0.3, 0.7],
@@ -34,9 +37,8 @@ pca = PCA(n_components=2)
 enn = EditedNearestNeighbours()
 renn = RepeatedEditedNearestNeighbours()
 
-# Create teh classifier
+# Create the classifier
 knn = KNN(1)
-
 
 # Make the splits
 X_train, X_test, y_train, y_test = tts(X, y, random_state=42)

@@ -1,19 +1,21 @@
 ﻿"""Class to perform random over-sampling."""
-from __future__ import print_function
-from __future__ import division
 
-import numpy as np
+# Authors: Guillaume Lemaitre <g.lemaitre58@gmail.com>
+#          Christos Aridas
+# License: MIT
+
+from __future__ import division, print_function
 
 from collections import Counter
 
-from sklearn.neighbors import NearestNeighbors
+import numpy as np
 from sklearn.utils import check_random_state
 
 from ..base import BaseBinarySampler
+from ..utils import check_neighbors_object
 
 
 class ADASYN(BaseBinarySampler):
-
     """Perform over-sampling using ADASYN.
 
     Perform over-sampling using Adaptive Synthetic Sampling Approach for
@@ -33,8 +35,18 @@ class ADASYN(BaseBinarySampler):
         If None, the random number generator is the RandomState instance used
         by np.random.
 
-    k : int, optional (default=5)
+    k : int, optional (default=None)
         Number of nearest neighbours to used to construct synthetic samples.
+
+        NOTE: `k` is deprecated from 0.2 and will be replaced in 0.4
+        Use ``n_neighbors`` instead.
+
+    n_neighbors : int int or object, optional (default=5)
+        If int, number of nearest neighbours to used to construct
+        synthetic samples.
+        If object, an estimator that inherits from
+        `sklearn.neighbors.base.KNeighborsMixin` that will be used to find
+        the k_neighbors.
 
     n_jobs : int, optional (default=1)
         Number of threads to run the algorithm when it is possible.
@@ -65,17 +77,18 @@ class ADASYN(BaseBinarySampler):
 
     >>> from collections import Counter
     >>> from sklearn.datasets import make_classification
-    >>> from imblearn.over_sampling import ADASYN
-    >>> X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-    ...                            n_informative=3, n_redundant=1, flip_y=0,
-    ...                            n_features=20, n_clusters_per_class=1,
-    ...                            n_samples=1000, random_state=10)
+    >>> from imblearn.over_sampling import \
+    ADASYN # doctest: +NORMALIZE_WHITESPACE
+    >>> X, y = make_classification(n_classes=2, class_sep=2,
+    ... weights=[0.1, 0.9], n_informative=3, n_redundant=1, flip_y=0,
+    ... n_features=20, n_clusters_per_class=1, n_samples=1000,
+    ... random_state=10)
     >>> print('Original dataset shape {}'.format(Counter(y)))
     Original dataset shape Counter({1: 900, 0: 100})
     >>> ada = ADASYN(random_state=42)
     >>> X_res, y_res = ada.fit_sample(X, y)
     >>> print('Resampled dataset shape {}'.format(Counter(y_res)))
-    Resampled dataset shape Counter({0: 909, 1: 900})
+    Resampled dataset shape Counter({0: 904, 1: 900})
 
     References
     ----------
@@ -89,14 +102,39 @@ class ADASYN(BaseBinarySampler):
     def __init__(self,
                  ratio='auto',
                  random_state=None,
-                 k=5,
+                 k=None,
+                 n_neighbors=5,
                  n_jobs=1):
-        super(ADASYN, self).__init__(ratio=ratio)
-        self.random_state = random_state
+        super(ADASYN, self).__init__(ratio=ratio, random_state=random_state)
         self.k = k
+        self.n_neighbors = n_neighbors
         self.n_jobs = n_jobs
-        self.nearest_neighbour = NearestNeighbors(n_neighbors=self.k + 1,
-                                                  n_jobs=self.n_jobs)
+
+    def fit(self, X, y):
+        """Find the classes statistics before to perform sampling.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_samples, n_features)
+            Matrix containing the data which have to be sampled.
+
+        y : ndarray, shape (n_samples, )
+            Corresponding label for each sample in X.
+
+        Returns
+        -------
+        self : object,
+            Return self.
+
+        """
+
+        super(ADASYN, self).fit(X, y)
+        self.nn_ = check_neighbors_object('n_neighbors', self.n_neighbors,
+                                          additional_neighbor=1)
+        # set the number of jobs
+        self.nn_.set_params(**{'n_jobs': self.n_jobs})
+
+        return self
 
     def _sample(self, X, y):
         """Resample the dataset.
@@ -127,8 +165,8 @@ class ADASYN(BaseBinarySampler):
         # Define the number of sample to create
         # We handle only two classes problem for the moment.
         if self.ratio == 'auto':
-            num_samples = (self.stats_c_[self.maj_c_] -
-                           self.stats_c_[self.min_c_])
+            num_samples = (
+                self.stats_c_[self.maj_c_] - self.stats_c_[self.min_c_])
         else:
             num_samples = int((self.ratio * self.stats_c_[self.maj_c_]) -
                               self.stats_c_[self.min_c_])
@@ -137,17 +175,19 @@ class ADASYN(BaseBinarySampler):
         X_min = X[y == self.min_c_]
 
         # Print if verbose is true
-        self.logger.debug('Finding the %s nearest neighbours ...', self.k)
+        self.logger.debug('Finding the %s nearest neighbours ...',
+                          self.nn_.n_neighbors - 1)
 
         # Look for k-th nearest neighbours, excluding, of course, the
         # point itself.
-        self.nearest_neighbour.fit(X)
+        self.nn_.fit(X)
 
         # Get the distance to the NN
-        _, ind_nn = self.nearest_neighbour.kneighbors(X_min)
+        _, ind_nn = self.nn_.kneighbors(X_min)
 
         # Compute the ratio of majority samples next to minority samples
-        ratio_nn = np.sum(y[ind_nn[:, 1:]] == self.maj_c_, axis=1) / self.k
+        ratio_nn = (np.sum(y[ind_nn[:, 1:]] == self.maj_c_, axis=1) /
+                    (self.nn_.n_neighbors - 1))
         # Check that we found at least some neighbours belonging to the
         # majority class
         if not np.sum(ratio_nn):
@@ -165,16 +205,16 @@ class ADASYN(BaseBinarySampler):
         for x_i, x_i_nn, num_sample_i in zip(X_min, ind_nn, num_samples_nn):
 
             # Pick-up the neighbors wanted
-            nn_zs = random_state.randint(1, high=self.k + 1, size=num_sample_i)
+            nn_zs = random_state.randint(
+                1, high=self.nn_.n_neighbors, size=num_sample_i)
 
             # Create a new sample
             for nn_z in nn_zs:
                 step = random_state.uniform()
-                x_gen = x_i + step * (x_i - X[x_i_nn[nn_z], :])
+                x_gen = x_i + step * (X[x_i_nn[nn_z], :] - x_i)
                 X_resampled = np.vstack((X_resampled, x_gen))
                 y_resampled = np.hstack((y_resampled, self.min_c_))
 
-        self.logger.info('Over-sampling performed: %s', Counter(
-            y_resampled))
+        self.logger.info('Over-sampling performed: %s', Counter(y_resampled))
 
         return X_resampled, y_resampled

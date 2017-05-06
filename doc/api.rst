@@ -13,24 +13,44 @@ Under-sampling methods
     :no-members:
     :no-inherited-members:
 
-Classes
--------
+.. currentmodule:: imblearn
+
+Prototype generation
+--------------------
+
+.. automodule:: imblearn.under_sampling.prototype_generation
+   :no-members:
+   :no-inherited-members:
+
 .. currentmodule:: imblearn
 
 .. autosummary::
    :toctree: generated/
-   
+
    under_sampling.ClusterCentroids
+
+Prototype selection
+-------------------
+
+.. automodule:: imblearn.under_sampling.prototype_selection
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: imblearn
+
+.. autosummary::
+   :toctree: generated/
+
    under_sampling.CondensedNearestNeighbour
    under_sampling.EditedNearestNeighbours
    under_sampling.RepeatedEditedNearestNeighbours
+   under_sampling.AllKNN
    under_sampling.InstanceHardnessThreshold
    under_sampling.NearMiss
    under_sampling.NeighbourhoodCleaningRule
    under_sampling.OneSidedSelection
    under_sampling.RandomUnderSampler
    under_sampling.TomekLinks
-
 
 .. _over_sampling_ref:
 
@@ -41,13 +61,11 @@ Over-sampling methods
     :no-members:
     :no-inherited-members:
 
-Classes
--------
 .. currentmodule:: imblearn
 
 .. autosummary::
    :toctree: generated/
-   
+
    over_sampling.ADASYN
    over_sampling.RandomOverSampler
    over_sampling.SMOTE
@@ -62,13 +80,11 @@ Combination of over- and under-sampling methods
     :no-members:
     :no-inherited-members:
 
-Classes
--------
 .. currentmodule:: imblearn
 
 .. autosummary::
    :toctree: generated/
-   
+
    combine.SMOTEENN
    combine.SMOTETomek
 
@@ -82,13 +98,11 @@ Ensemble methods
     :no-members:
     :no-inherited-members:
 
-Classes
--------
 .. currentmodule:: imblearn
 
 .. autosummary::
    :toctree: generated/
-   
+
    ensemble.BalanceCascade
    ensemble.EasyEnsemble
 
@@ -104,20 +118,31 @@ Pipeline
 
 .. currentmodule:: imblearn
 
-Classes
--------
 .. autosummary::
    :toctree: generated/
-   
-   pipeline.Pipeline
 
-Functions
----------
-.. autosummary::
-   :toctree: generated/
-   
+   pipeline.Pipeline
    pipeline.make_pipeline
 
+.. _metrics_ref:
+
+Metrics
+=======
+
+.. automodule:: imblearn.metrics
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: imblearn
+
+.. autosummary::
+   :toctree: generated/
+
+   metrics.sensitivity_specificity_support
+   metrics.sensitivity_score
+   metrics.specificity_score
+   metrics.geometric_mean_score
+   metrics.make_index_balanced_accuracy
 
 .. _datasets_ref:
 
@@ -130,9 +155,22 @@ Datasets
 
 .. currentmodule:: imblearn
 
-Functions
----------
 .. autosummary::
    :toctree: generated/
-   
+
    datasets.make_imbalance
+   datasets.fetch_datasets
+
+Utilities
+=========
+
+.. automodule:: imblearn.utils
+    :no-members:
+    :no-inherited-members:
+
+.. currentmodule:: imblearn
+
+.. autosummary::
+   :toctree: generated/
+
+   utils.estimator_checks.check_estimator

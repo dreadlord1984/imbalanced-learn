@@ -24,25 +24,18 @@ popd
 
 # Configure the conda environment and put it in the path using the
 # provided versions
-conda create -n testenv --yes python=$PYTHON_VERSION pip nose \
+conda create -n testenv --yes python=$PYTHON_VERSION pip nose
     numpy=$NUMPY_VERSION scipy=$SCIPY_VERSION \
     libgfortran nomkl
-#source activate testenv
+source activate testenv
+
+# Install scikit-learn
+conda install --yes scikit-learn=$SKLEARN_VERSION
 
 # Install nose-timer via pip
-pip install nose-timer
+pip install nose-timer coverage codecov
 
-# Install libgfortran with conda
-conda install --yes libgfortran \
-    numpy=1.10.4 scipy=0.17.1 \
-    scikit-learn=0.17.1 \
-    six=1.10.0 
-
-if [[ "$COVERAGE" == "true" ]]; then
-    pip install coverage coveralls
-fi
-
-# Build scikit-cycling in the install.sh script to collapse the verbose
+# Build imbalanced-learn in the install.sh script to collapse the verbose
 # build output in the travis output when it succeeds.
 python --version
 python -c "import numpy; print('numpy %s' % numpy.__version__)"

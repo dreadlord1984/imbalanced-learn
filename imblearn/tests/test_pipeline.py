@@ -1,8 +1,12 @@
 """
 Test the pipeline module.
 """
-import numpy as np
 
+from tempfile import mkdtemp
+import shutil
+import time
+
+import numpy as np
 from sklearn.utils.testing import assert_raises
 from sklearn.utils.testing import assert_raises_regex
 from sklearn.utils.testing import assert_raise_message
@@ -11,23 +15,23 @@ from sklearn.utils.testing import assert_false
 from sklearn.utils.testing import assert_true
 from sklearn.utils.testing import assert_array_equal
 from sklearn.utils.testing import assert_array_almost_equal
-from sklearn.utils.testing import assert_warns_message
+from sklearn.utils.testing import assert_dict_equal
+from sklearn.utils.testing import assert_allclose
 
-from sklearn.base import clone
+from sklearn.base import clone, BaseEstimator
 from sklearn.svm import SVC
+from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.decomposition import PCA
-from sklearn.datasets import load_iris
+from sklearn.datasets import load_iris, make_classification
 from sklearn.preprocessing import StandardScaler
-from sklearn.datasets import make_classification
+from sklearn.externals.joblib import Memory
 
-from imblearn.pipeline import Pipeline
-from imblearn.pipeline import make_pipeline
-from imblearn.under_sampling import RandomUnderSampler
-
+from imblearn.pipeline import Pipeline, make_pipeline
+from imblearn.under_sampling import (RandomUnderSampler,
+                                     EditedNearestNeighbours as ENN)
 
 JUNK_FOOD_DOCS = (
     "the pizza pizza beer copyright",
@@ -38,8 +42,10 @@ JUNK_FOOD_DOCS = (
     "the coke burger burger",
 )
 
+R_TOL = 1e-4
 
-class IncorrectT(object):
+
+class NoFit(object):
     """Small class to test parameter dispatching.
     """
 
@@ -48,7 +54,7 @@ class IncorrectT(object):
         self.b = b
 
 
-class T(IncorrectT):
+class NoTrans(NoFit):
 
     def fit(self, X, y):
         return self
@@ -61,8 +67,12 @@ class T(IncorrectT):
         return self
 
 
-class TransfT(T):
+class NoInvTransf(NoTrans):
+    def transform(self, X, y=None):
+        return X
 
+
+class Transf(NoInvTransf):
     def transform(self, X, y=None):
         return X
 
@@ -70,7 +80,36 @@ class TransfT(T):
         return X
 
 
-class FitParamT(object):
+class TransfFitParams(Transf):
+
+    def fit(self, X, y, **fit_params):
+        self.fit_params = fit_params
+        return self
+
+
+class Mult(BaseEstimator):
+    def __init__(self, mult=1):
+        self.mult = mult
+
+    def fit(self, X, y):
+        return self
+
+    def transform(self, X):
+        return np.asarray(X) * self.mult
+
+    def inverse_transform(self, X):
+        return np.asarray(X) / self.mult
+
+    def predict(self, X):
+        return (np.asarray(X) * self.mult).sum(axis=1)
+
+    predict_proba = predict_log_proba = decision_function = predict
+
+    def score(self, X, y=None):
+        return np.sum(X)
+
+
+class FitParamT(BaseEstimator):
     """Mock classifier
     """
 
@@ -83,15 +122,69 @@ class FitParamT(object):
     def predict(self, X):
         return self.successful
 
+    def fit_predict(self, X, y, should_succeed=False):
+        self.fit(X, y, should_succeed=should_succeed)
+        return self.predict(X)
+
+    def score(self, X, y=None, sample_weight=None):
+        if sample_weight is not None:
+            X = X * sample_weight
+        return np.sum(X)
+
+
+class DummyTransf(Transf):
+    """Transformer which store the column means"""
+
+    def fit(self, X, y):
+        self.means_ = np.mean(X, axis=0)
+        # store timestamp to figure out whether the result of 'fit' has been
+        # cached or not
+        self.timestamp_ = time.time()
+        return self
+
+
+class DummySampler(NoTrans):
+    """Samplers which returns a balanced number of samples"""
+
+    def fit(self, X, y):
+        self.means_ = np.mean(X, axis=0)
+        # store timestamp to figure out whether the result of 'fit' has been
+        # cached or not
+        self.timestamp_ = time.time()
+        return self
+
+    def sample(self, X, y):
+        return X, y
+
+    def fit_sample(self, X, y):
+        return self.fit(X, y).sample(X, y)
+
+
+class FitTransformSample(NoTrans):
+    """Estimator implementing both transform and sample
+    """
+
+    def fit(self, X, y, should_succeed=False):
+        pass
+
+    def sample(self, X, y=None):
+        return X, y
+
+    def transform(self, X, y=None):
+        return X
+
 
 def test_pipeline_init():
     # Test the various init parameters of the pipeline.
     assert_raises(TypeError, Pipeline)
     # Check that we can't instantiate pipelines with objects without fit
     # method
-    pipe = assert_raises(TypeError, Pipeline, [('svc', IncorrectT)])
+    assert_raises_regex(TypeError,
+                        'Last step of Pipeline should implement fit. '
+                        '.*NoFit.*',
+                        Pipeline, [('clf', NoFit())])
     # Smoke test with only an estimator
-    clf = T()
+    clf = NoTrans()
     pipe = Pipeline([('svc', clf)])
     assert_equal(pipe.get_params(deep=True),
                  dict(svc__a=None, svc__b=None, svc=clf,
@@ -109,8 +202,11 @@ def test_pipeline_init():
     filter1 = SelectKBest(f_classif)
     pipe = Pipeline([('anova', filter1), ('svc', clf)])
 
-    # Check that we can't use the same stage name twice
-    assert_raises(ValueError, Pipeline, [('svc', SVC()), ('svc', SVC())])
+    # Check that we can't instantiate with non-transformers on the way
+    # Note that NoTrans implements fit, but not transform
+    assert_raises_regex(TypeError,
+                        'implement fit and transform or sample',
+                        Pipeline, [('t', NoTrans()), ('svc', clf)])
 
     # Check that params are set
     pipe.set_params(svc__C=0.1)
@@ -161,13 +257,44 @@ def test_pipeline_methods_anova():
 
 def test_pipeline_fit_params():
     # Test that the pipeline can take fit parameters
-    pipe = Pipeline([('transf', TransfT()), ('clf', FitParamT())])
+    pipe = Pipeline([('transf', Transf()), ('clf', FitParamT())])
     pipe.fit(X=None, y=None, clf__should_succeed=True)
     # classifier should return True
     assert_true(pipe.predict(None))
     # and transformer params should not be changed
     assert_true(pipe.named_steps['transf'].a is None)
     assert_true(pipe.named_steps['transf'].b is None)
+    # invalid parameters should raise an error message
+    assert_raise_message(
+        TypeError,
+        "fit() got an unexpected keyword argument 'bad'",
+        pipe.fit, None, None, clf__bad=True
+    )
+
+
+def test_pipeline_sample_weight_supported():
+    # Pipeline should pass sample_weight
+    X = np.array([[1, 2]])
+    pipe = Pipeline([('transf', Transf()), ('clf', FitParamT())])
+    pipe.fit(X, y=None)
+    assert_equal(pipe.score(X), 3)
+    assert_equal(pipe.score(X, y=None), 3)
+    assert_equal(pipe.score(X, y=None, sample_weight=None), 3)
+    assert_equal(pipe.score(X, sample_weight=np.array([2, 3])), 8)
+
+
+def test_pipeline_sample_weight_unsupported():
+    # When sample_weight is None it shouldn't be passed
+    X = np.array([[1, 2]])
+    pipe = Pipeline([('transf', Transf()), ('clf', Mult())])
+    pipe.fit(X, y=None)
+    assert_equal(pipe.score(X), 3)
+    assert_equal(pipe.score(X, sample_weight=None), 3)
+    assert_raise_message(
+        TypeError,
+        "score() got an unexpected keyword argument 'sample_weight'",
+        pipe.score, X, sample_weight=np.array([2, 3])
+    )
 
 
 def test_pipeline_raise_set_params_error():
@@ -198,7 +325,7 @@ def test_pipeline_methods_pca_svm():
     y = iris.target
     # Test with PCA + SVC
     clf = SVC(probability=True, random_state=0)
-    pca = PCA()
+    pca = PCA(svd_solver='full', n_components='mle', whiten=True)
     pipe = Pipeline([('pca', pca), ('svc', clf)])
     pipe.fit(X, y)
     pipe.predict(X)
@@ -215,7 +342,7 @@ def test_pipeline_methods_preprocessing_svm():
     n_samples = X.shape[0]
     n_classes = len(np.unique(y))
     scaler = StandardScaler()
-    pca = PCA(n_components=2)
+    pca = PCA(n_components=2, svd_solver='randomized', whiten=True)
     clf = SVC(probability=True, random_state=0, decision_function_shape='ovr')
 
     for preprocessing in [scaler, pca]:
@@ -245,13 +372,20 @@ def test_fit_predict_on_pipeline():
     iris = load_iris()
     scaler = StandardScaler()
     km = KMeans(random_state=0)
+    # As pipeline doesn't clone estimators on construction,
+    # it must have its own estimators
+    scaler_for_pipeline = StandardScaler()
+    km_for_pipeline = KMeans(random_state=0)
 
     # first compute the transform and clustering step separately
     scaled = scaler.fit_transform(iris.data)
     separate_pred = km.fit_predict(scaled)
 
     # use a pipeline to do the transform and clustering in one step
-    pipe = Pipeline([('scaler', scaler), ('Kmeans', km)])
+    pipe = Pipeline([
+        ('scaler', scaler_for_pipeline),
+        ('Kmeans', km_for_pipeline)
+    ])
     pipeline_pred = pipe.fit_predict(iris.data)
 
     assert_array_almost_equal(pipeline_pred, separate_pred)
@@ -261,11 +395,24 @@ def test_fit_predict_on_pipeline_without_fit_predict():
     # tests that a pipeline does not have fit_predict method when final
     # step of pipeline does not have fit_predict defined
     scaler = StandardScaler()
-    pca = PCA()
+    pca = PCA(svd_solver='full')
     pipe = Pipeline([('scaler', scaler), ('pca', pca)])
     assert_raises_regex(AttributeError,
                         "'PCA' object has no attribute 'fit_predict'",
                         getattr, pipe, 'fit_predict')
+
+
+def test_fit_predict_with_intermediate_fit_params():
+    # tests that Pipeline passes fit_params to intermediate steps
+    # when fit_predict is invoked
+    pipe = Pipeline([('transf', TransfFitParams()), ('clf', FitParamT())])
+    pipe.fit_predict(X=None,
+                     y=None,
+                     transf__should_get_this=True,
+                     clf__should_succeed=True)
+    assert_true(pipe.named_steps['transf'].fit_params['should_get_this'])
+    assert_true(pipe.named_steps['clf'].successful)
+    assert_false('should_succeed' in pipe.named_steps['transf'].fit_params)
 
 
 def test_pipeline_transform():
@@ -273,7 +420,7 @@ def test_pipeline_transform():
     # Also test pipeline.transform and pipeline.inverse_transform
     iris = load_iris()
     X = iris.data
-    pca = PCA(n_components=2)
+    pca = PCA(n_components=2, svd_solver='full')
     pipeline = Pipeline([('pca', pca)])
 
     # test transform and fit_transform:
@@ -293,28 +440,152 @@ def test_pipeline_fit_transform():
     iris = load_iris()
     X = iris.data
     y = iris.target
-    transft = TransfT()
-    pipeline = Pipeline([('mock', transft)])
+    transf = Transf()
+    pipeline = Pipeline([('mock', transf)])
 
     # test fit_transform:
     X_trans = pipeline.fit_transform(X, y)
-    X_trans2 = transft.fit(X, y).transform(X)
+    X_trans2 = transf.fit(X, y).transform(X)
     assert_array_almost_equal(X_trans, X_trans2)
 
 
-def test_make_pipeline():
-    t1 = TransfT()
-    t2 = TransfT()
+def test_set_pipeline_steps():
+    transf1 = Transf()
+    transf2 = Transf()
+    pipeline = Pipeline([('mock', transf1)])
+    assert_true(pipeline.named_steps['mock'] is transf1)
 
+    # Directly setting attr
+    pipeline.steps = [('mock2', transf2)]
+    assert_true('mock' not in pipeline.named_steps)
+    assert_true(pipeline.named_steps['mock2'] is transf2)
+    assert_equal([('mock2', transf2)], pipeline.steps)
+
+    # Using set_params
+    pipeline.set_params(steps=[('mock', transf1)])
+    assert_equal([('mock', transf1)], pipeline.steps)
+
+    # Using set_params to replace single step
+    pipeline.set_params(mock=transf2)
+    assert_equal([('mock', transf2)], pipeline.steps)
+
+    # With invalid data
+    pipeline.set_params(steps=[('junk', ())])
+    assert_raises(TypeError, pipeline.fit, [[1]], [1])
+    assert_raises(TypeError, pipeline.fit_transform, [[1]], [1])
+
+
+def test_set_pipeline_step_none():
+    # Test setting Pipeline steps to None
+    X = np.array([[1]])
+    y = np.array([1])
+    mult2 = Mult(mult=2)
+    mult3 = Mult(mult=3)
+    mult5 = Mult(mult=5)
+
+    def make():
+        return Pipeline([('m2', mult2), ('m3', mult3), ('last', mult5)])
+
+    pipeline = make()
+
+    exp = 2 * 3 * 5
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal([exp], pipeline.fit(X).predict(X))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+
+    pipeline.set_params(m3=None)
+    exp = 2 * 5
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal([exp], pipeline.fit(X).predict(X))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+    assert_dict_equal(pipeline.get_params(deep=True),
+                      {'steps': pipeline.steps,
+                       'm2': mult2,
+                       'm3': None,
+                       'last': mult5,
+                       'memory': None,
+                       'm2__mult': 2,
+                       'last__mult': 5,
+                       })
+
+    pipeline.set_params(m2=None)
+    exp = 5
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal([exp], pipeline.fit(X).predict(X))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+
+    # for other methods, ensure no AttributeErrors on None:
+    other_methods = ['predict_proba', 'predict_log_proba',
+                     'decision_function', 'transform', 'score']
+    for method in other_methods:
+        getattr(pipeline, method)(X)
+
+    pipeline.set_params(m2=mult2)
+    exp = 2 * 5
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal([exp], pipeline.fit(X).predict(X))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+
+    pipeline = make()
+    pipeline.set_params(last=None)
+    # mult2 and mult3 are active
+    exp = 6
+    pipeline.fit(X, y)
+    pipeline.transform(X)
+    assert_array_equal([[exp]], pipeline.fit(X, y).transform(X))
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+    assert_raise_message(AttributeError,
+                         "'NoneType' object has no attribute 'predict'",
+                         getattr, pipeline, 'predict')
+
+    # Check None step at construction time
+    exp = 2 * 5
+    pipeline = Pipeline([('m2', mult2), ('m3', None), ('last', mult5)])
+    assert_array_equal([[exp]], pipeline.fit_transform(X, y))
+    assert_array_equal([exp], pipeline.fit(X).predict(X))
+    assert_array_equal(X, pipeline.inverse_transform([[exp]]))
+
+
+def test_pipeline_ducktyping():
+    pipeline = make_pipeline(Mult(5))
+    pipeline.predict
+    pipeline.transform
+    pipeline.inverse_transform
+
+    pipeline = make_pipeline(Transf())
+    assert_false(hasattr(pipeline, 'predict'))
+    pipeline.transform
+    pipeline.inverse_transform
+
+    pipeline = make_pipeline(None)
+    assert_false(hasattr(pipeline, 'predict'))
+    pipeline.transform
+    pipeline.inverse_transform
+
+    pipeline = make_pipeline(Transf(), NoInvTransf())
+    assert_false(hasattr(pipeline, 'predict'))
+    pipeline.transform
+    assert_false(hasattr(pipeline, 'inverse_transform'))
+
+    pipeline = make_pipeline(NoInvTransf(), Transf())
+    assert_false(hasattr(pipeline, 'predict'))
+    pipeline.transform
+    assert_false(hasattr(pipeline, 'inverse_transform'))
+
+
+def test_make_pipeline():
+    t1 = Transf()
+    t2 = Transf()
     pipe = make_pipeline(t1, t2)
     assert_true(isinstance(pipe, Pipeline))
-    assert_equal(pipe.steps[0][0], "transft-1")
-    assert_equal(pipe.steps[1][0], "transft-2")
+    assert_equal(pipe.steps[0][0], "transf-1")
+    assert_equal(pipe.steps[1][0], "transf-2")
 
     pipe = make_pipeline(t1, t2, FitParamT())
     assert_true(isinstance(pipe, Pipeline))
-    assert_equal(pipe.steps[0][0], "transft-1")
-    assert_equal(pipe.steps[1][0], "transft-2")
+    assert_equal(pipe.steps[0][0], "transf-1")
+    assert_equal(pipe.steps[1][0], "transf-2")
     assert_equal(pipe.steps[2][0], "fitparamt")
 
 
@@ -333,20 +604,166 @@ def test_classes_property():
     assert_array_equal(clf.classes_, np.unique(y))
 
 
-def test_X1d_inverse_transform():
-    transformer = TransfT()
-    pipeline = make_pipeline(transformer)
-    X = np.ones(10)
-    msg = "1d X will not be reshaped in pipeline.inverse_transform"
-    assert_warns_message(FutureWarning, msg, pipeline.inverse_transform, X)
+def test_pipeline_wrong_memory():
+    # Test that an error is raised when memory is not a string or a Memory
+    # instance
+    iris = load_iris()
+    X = iris.data
+    y = iris.target
+    # Define memory as an integer
+    memory = 1
+    cached_pipe = Pipeline([('transf', DummyTransf()), ('svc', SVC())],
+                           memory=memory)
+    assert_raises_regex(ValueError, "'memory' should either be a string or a"
+                        " joblib.Memory instance, got 'memory=1' instead.",
+                        cached_pipe.fit, X, y)
+
+
+def test_pipeline_memory_transformer():
+    iris = load_iris()
+    X = iris.data
+    y = iris.target
+    cachedir = mkdtemp()
+    try:
+        memory = Memory(cachedir=cachedir, verbose=10)
+        # Test with Transformer + SVC
+        clf = SVC(probability=True, random_state=0)
+        transf = DummyTransf()
+        pipe = Pipeline([('transf', clone(transf)), ('svc', clf)])
+        cached_pipe = Pipeline([('transf', transf), ('svc', clf)],
+                               memory=memory)
+
+        # Memoize the transformer at the first fit
+        cached_pipe.fit(X, y)
+        pipe.fit(X, y)
+        # Get the time stamp of the tranformer in the cached pipeline
+        ts = cached_pipe.named_steps['transf'].timestamp_
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe.predict(X))
+        assert_array_equal(pipe.predict_proba(X), cached_pipe.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe.named_steps['transf'].means_)
+        assert_false(hasattr(transf, 'means_'))
+        # Check that we are reading the cache while fitting
+        # a second time
+        cached_pipe.fit(X, y)
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe.predict(X))
+        assert_array_equal(pipe.predict_proba(X), cached_pipe.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe.named_steps['transf'].means_)
+        assert_equal(ts, cached_pipe.named_steps['transf'].timestamp_)
+        # Create a new pipeline with cloned estimators
+        # Check that even changing the name step does not affect the cache hit
+        clf_2 = SVC(probability=True, random_state=0)
+        transf_2 = DummyTransf()
+        cached_pipe_2 = Pipeline([('transf_2', transf_2), ('svc', clf_2)],
+                                 memory=memory)
+        cached_pipe_2.fit(X, y)
+
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe_2.predict(X))
+        assert_array_equal(pipe.predict_proba(X),
+                           cached_pipe_2.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe_2.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe_2.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe_2.named_steps['transf_2'].means_)
+        assert_equal(ts, cached_pipe_2.named_steps['transf_2'].timestamp_)
+    finally:
+        shutil.rmtree(cachedir)
+
+
+def test_pipeline_memory_sampler():
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+    cachedir = mkdtemp()
+    try:
+        memory = Memory(cachedir=cachedir, verbose=10)
+        # Test with Transformer + SVC
+        clf = SVC(probability=True, random_state=0)
+        transf = DummySampler()
+        pipe = Pipeline([('transf', clone(transf)), ('svc', clf)])
+        cached_pipe = Pipeline([('transf', transf), ('svc', clf)],
+                               memory=memory)
+
+        # Memoize the transformer at the first fit
+        cached_pipe.fit(X, y)
+        pipe.fit(X, y)
+        # Get the time stamp of the tranformer in the cached pipeline
+        ts = cached_pipe.named_steps['transf'].timestamp_
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe.predict(X))
+        assert_array_equal(pipe.predict_proba(X), cached_pipe.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe.named_steps['transf'].means_)
+        assert_false(hasattr(transf, 'means_'))
+        # Check that we are reading the cache while fitting
+        # a second time
+        cached_pipe.fit(X, y)
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe.predict(X))
+        assert_array_equal(pipe.predict_proba(X), cached_pipe.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe.named_steps['transf'].means_)
+        assert_equal(ts, cached_pipe.named_steps['transf'].timestamp_)
+        # Create a new pipeline with cloned estimators
+        # Check that even changing the name step does not affect the cache hit
+        clf_2 = SVC(probability=True, random_state=0)
+        transf_2 = DummySampler()
+        cached_pipe_2 = Pipeline([('transf_2', transf_2), ('svc', clf_2)],
+                                 memory=memory)
+        cached_pipe_2.fit(X, y)
+
+        # Check that cached_pipe and pipe yield identical results
+        assert_array_equal(pipe.predict(X), cached_pipe_2.predict(X))
+        assert_array_equal(pipe.predict_proba(X),
+                           cached_pipe_2.predict_proba(X))
+        assert_array_equal(pipe.predict_log_proba(X),
+                           cached_pipe_2.predict_log_proba(X))
+        assert_array_equal(pipe.score(X, y), cached_pipe_2.score(X, y))
+        assert_array_equal(pipe.named_steps['transf'].means_,
+                           cached_pipe_2.named_steps['transf_2'].means_)
+        assert_equal(ts, cached_pipe_2.named_steps['transf_2'].timestamp_)
+    finally:
+        shutil.rmtree(cachedir)
 
 
 def test_pipeline_methods_pca_rus_svm():
     # Test the various methods of the pipeline (pca + svm).
-    X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-                               n_informative=3, n_redundant=1, flip_y=0,
-                               n_features=20, n_clusters_per_class=1,
-                               n_samples=5000, random_state=0)
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
 
     # Test with PCA + SVC
     clf = SVC(probability=True, random_state=0)
@@ -362,10 +779,17 @@ def test_pipeline_methods_pca_rus_svm():
 
 def test_pipeline_methods_rus_pca_svm():
     # Test the various methods of the pipeline (pca + svm).
-    X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-                               n_informative=3, n_redundant=1, flip_y=0,
-                               n_features=20, n_clusters_per_class=1,
-                               n_samples=5000, random_state=0)
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
 
     # Test with PCA + SVC
     clf = SVC(probability=True, random_state=0)
@@ -382,10 +806,17 @@ def test_pipeline_methods_rus_pca_svm():
 def test_pipeline_sample():
     # Test whether pipeline works with a sampler at the end.
     # Also test pipeline.sampler
-    X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-                               n_informative=3, n_redundant=1, flip_y=0,
-                               n_features=20, n_clusters_per_class=1,
-                               n_samples=5000, random_state=0)
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
 
     rus = RandomUnderSampler(random_state=0)
     pipeline = Pipeline([('rus', rus)])
@@ -394,28 +825,40 @@ def test_pipeline_sample():
     X_trans, y_trans = pipeline.fit(X, y).sample(X, y)
     X_trans2, y_trans2 = pipeline.fit_sample(X, y)
     X_trans3, y_trans3 = rus.fit_sample(X, y)
-    assert_array_almost_equal(X_trans, X_trans2)
-    assert_array_almost_equal(X_trans, X_trans3)
-    assert_array_almost_equal(y_trans, y_trans2)
-    assert_array_almost_equal(y_trans, y_trans3)
+    assert_allclose(X_trans, X_trans2, rtol=R_TOL)
+    assert_allclose(X_trans, X_trans3, rtol=R_TOL)
+    assert_allclose(y_trans, y_trans2, rtol=R_TOL)
+    assert_allclose(y_trans, y_trans3, rtol=R_TOL)
 
     pca = PCA()
-    pipeline = Pipeline([('pca', pca), ('rus', rus)])
+    pipeline = Pipeline([('pca', PCA()),
+                         ('rus', rus)])
 
     X_trans, y_trans = pipeline.fit(X, y).sample(X, y)
     X_pca = pca.fit_transform(X)
     X_trans2, y_trans2 = rus.fit_sample(X_pca, y)
-    assert_array_almost_equal(X_trans, X_trans2)
-    assert_array_almost_equal(y_trans, y_trans2)
+    # We round the value near to zero. It seems that PCA has some issue
+    # with that
+    X_trans[np.bitwise_and(X_trans < R_TOL, X_trans > -R_TOL)] = 0
+    X_trans2[np.bitwise_and(X_trans2 < R_TOL, X_trans2 > -R_TOL)] = 0
+    assert_allclose(X_trans, X_trans2, rtol=R_TOL)
+    assert_allclose(y_trans, y_trans2, rtol=R_TOL)
 
 
 def test_pipeline_sample_transform():
     # Test whether pipeline works with a sampler at the end.
     # Also test pipeline.sampler
-    X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-                               n_informative=3, n_redundant=1, flip_y=0,
-                               n_features=20, n_clusters_per_class=1,
-                               n_samples=5000, random_state=0)
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
 
     rus = RandomUnderSampler(random_state=0)
     pca = PCA()
@@ -425,12 +868,130 @@ def test_pipeline_sample_transform():
     pipeline.fit(X, y).transform(X)
 
 
+def test_pipeline_none_classifier():
+    # Test pipeline using None as preprocessing step and a classifier
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+    clf = LogisticRegression(random_state=0)
+    pipe = make_pipeline(None, clf)
+    pipe.fit(X, y)
+    pipe.predict(X)
+    pipe.predict_proba(X)
+    pipe.decision_function(X)
+    pipe.score(X, y)
+
+
+def test_pipeline_none_sampler_classifier():
+    # Test pipeline using None, RUS and a classifier
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+    clf = LogisticRegression(random_state=0)
+    rus = RandomUnderSampler(random_state=0)
+    pipe = make_pipeline(None, rus, clf)
+    pipe.fit(X, y)
+    pipe.predict(X)
+    pipe.predict_proba(X)
+    pipe.decision_function(X)
+    pipe.score(X, y)
+
+
+def test_pipeline_sampler_none_classifier():
+    # Test pipeline using RUS, None and a classifier
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+    clf = LogisticRegression(random_state=0)
+    rus = RandomUnderSampler(random_state=0)
+    pipe = make_pipeline(rus, None, clf)
+    pipe.fit(X, y)
+    pipe.predict(X)
+    pipe.predict_proba(X)
+    pipe.decision_function(X)
+    pipe.score(X, y)
+
+
+def test_pipeline_none_sampler_sample():
+    # Test pipeline using None step and a sampler
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+
+    rus = RandomUnderSampler(random_state=0)
+    pipe = make_pipeline(None, rus)
+    pipe.fit(X, y)
+    pipe.sample(X, y)
+
+
+def test_pipeline_none_transformer():
+    # Test pipeline using None and a transformer that implements transform and
+    # inverse_transform
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+
+    pca = PCA(whiten=True)
+    pipe = make_pipeline(None, pca)
+    pipe.fit(X, y)
+    X_trans = pipe.transform(X)
+    X_inversed = pipe.inverse_transform(X_trans)
+    assert_array_almost_equal(X, X_inversed)
+
+
 def test_pipeline_methods_anova_rus():
     # Test the various methods of the pipeline (anova).
-    X, y = make_classification(n_classes=2, class_sep=2, weights=[0.1, 0.9],
-                               n_informative=3, n_redundant=1, flip_y=0,
-                               n_features=20, n_clusters_per_class=1,
-                               n_samples=5000, random_state=0)
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
     # Test with RandomUnderSampling + Anova + LogisticRegression
     clf = LogisticRegression()
     rus = RandomUnderSampler(random_state=0)
@@ -441,3 +1002,92 @@ def test_pipeline_methods_anova_rus():
     pipe.predict_proba(X)
     pipe.predict_log_proba(X)
     pipe.score(X, y)
+
+
+def test_pipeline_with_step_that_implements_both_sample_and_transform():
+    # Test the various methods of the pipeline (anova).
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+
+    clf = LogisticRegression()
+    assert_raises(TypeError, Pipeline, [('step', FitTransformSample()),
+                                        ('logistic', clf)])
+    # assert_raises(TypeError, lambda x: [][0])
+
+
+def test_pipeline_with_step_that_it_is_pipeline():
+    # Test the various methods of the pipeline (anova).
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=5000,
+        random_state=0)
+    # Test with RandomUnderSampling + Anova + LogisticRegression
+    clf = LogisticRegression()
+    rus = RandomUnderSampler(random_state=0)
+    filter1 = SelectKBest(f_classif, k=2)
+    pipe1 = Pipeline([('rus', rus), ('anova', filter1)])
+    assert_raises(TypeError, Pipeline, [('pipe1', pipe1), ('logistic', clf)])
+
+
+def test_pipeline_fit_then_sample_with_sampler_last_estimator():
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=50000,
+        random_state=0)
+
+    rus = RandomUnderSampler(random_state=42)
+    enn = ENN()
+    pipeline = make_pipeline(rus, enn)
+    X_fit_sample_resampled, y_fit_sample_resampled = pipeline.fit_sample(X, y)
+    pipeline = make_pipeline(rus, enn)
+    pipeline.fit(X, y)
+    X_fit_then_sample_res, y_fit_then_sample_res = pipeline.sample(X, y)
+    assert_array_equal(X_fit_sample_resampled, X_fit_then_sample_res)
+    assert_array_equal(y_fit_sample_resampled, y_fit_then_sample_res)
+
+
+def test_pipeline_fit_then_sample_3_samplers_with_sampler_last_estimator():
+    X, y = make_classification(
+        n_classes=2,
+        class_sep=2,
+        weights=[0.1, 0.9],
+        n_informative=3,
+        n_redundant=1,
+        flip_y=0,
+        n_features=20,
+        n_clusters_per_class=1,
+        n_samples=50000,
+        random_state=0)
+
+    rus = RandomUnderSampler(random_state=42)
+    enn = ENN()
+    pipeline = make_pipeline(rus, enn, rus)
+    X_fit_sample_resampled, y_fit_sample_resampled = pipeline.fit_sample(X, y)
+    pipeline = make_pipeline(rus, enn, rus)
+    pipeline.fit(X, y)
+    X_fit_then_sample_res, y_fit_then_sample_res = pipeline.sample(X, y)
+    assert_array_equal(X_fit_sample_resampled, X_fit_then_sample_res)
+    assert_array_equal(y_fit_sample_resampled, y_fit_then_sample_res)

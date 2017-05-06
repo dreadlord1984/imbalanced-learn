@@ -1,16 +1,10 @@
 .. -*- mode: rst -*-
 
-imbalanced-learn
-================
-
-imbalanced-learn is a python package offering a number of re-sampling techniques commonly used in datasets showing strong between-class imbalance.
-It is compatible with scikit-learn_ and is part of scikit-learn-contrib_ projects.
-
 .. _scikit-learn: http://scikit-learn.org/stable/
 
-.. _scikit-learn-contrib: https://github.com/scikit-learn-contrib 
+.. _scikit-learn-contrib: https://github.com/scikit-learn-contrib
 
-|Landscape|_ |Travis|_ |Coveralls|_ |CircleCI|_ |Python27|_ |Python35|_ |Pypi|_ |Gitter|_
+|Landscape|_ |Travis|_ |AppVeyor|_ |Codecov|_ |CircleCI|_ |Python27|_ |Python35|_ |Pypi|_ |Gitter|_
 
 .. |Landscape| image:: https://landscape.io/github/scikit-learn-contrib/imbalanced-learn/master/landscape.svg?style=flat
 .. _Landscape: https://landscape.io/github/scikit-learn-contrib/imbalanced-learn/master
@@ -18,8 +12,11 @@ It is compatible with scikit-learn_ and is part of scikit-learn-contrib_ project
 .. |Travis| image:: https://travis-ci.org/scikit-learn-contrib/imbalanced-learn.svg?branch=master
 .. _Travis: https://travis-ci.org/scikit-learn-contrib/imbalanced-learn
 
-.. |Coveralls| image:: https://coveralls.io/repos/github/scikit-learn-contrib/imbalanced-learn/badge.svg?branch=master
-.. _Coveralls: https://coveralls.io/github/scikit-learn-contrib/imbalanced-learn?branch=master
+.. |AppVeyor| image:: https://ci.appveyor.com/api/projects/status/c8w4xb7re4euntvi/branch/master?svg=true
+.. _AppVeyor: https://ci.appveyor.com/project/glemaitre/imbalanced-learn/history
+
+.. |Codecov| image:: https://codecov.io/gh/scikit-learn-contrib/imbalanced-learn/branch/master/graph/badge.svg
+.. _Codecov: https://codecov.io/gh/scikit-learn-contrib/imbalanced-learn
 
 .. |CircleCI| image:: https://circleci.com/gh/scikit-learn-contrib/imbalanced-learn.svg?style=shield&circle-token=:circle-token
 .. _CircleCI: https://circleci.com/gh/scikit-learn-contrib/imbalanced-learn/tree/master
@@ -36,29 +33,42 @@ It is compatible with scikit-learn_ and is part of scikit-learn-contrib_ project
 .. |Gitter| image:: https://badges.gitter.im/scikit-learn-contrib/imbalanced-learn.svg
 .. _Gitter: https://gitter.im/scikit-learn-contrib/imbalanced-learn?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
 
-Documentation
-=============
+imbalanced-learn
+================
 
-Installation documentation, API documentation, and examples can be found on the documentation_.
+imbalanced-learn is a python package offering a number of re-sampling techniques
+commonly used in datasets showing strong between-class imbalance.
+It is compatible with scikit-learn_ and is part of scikit-learn-contrib_
+projects.
+
+Documentation
+-------------
+
+Installation documentation, API documentation, and examples can be found on the
+documentation_.
 
 .. _documentation: http://contrib.scikit-learn.org/imbalanced-learn/
 
 Installation
-============
+------------
 
 Dependencies
-------------
+~~~~~~~~~~~~
 
-imbalanced-learn is tested to work under Python 2.7 and Python 3.5.
+imbalanced-learn is tested to work under Python 2.7 and Python 3.4,
+3.5, and 3.6.
 
-* scipy(>=0.17.0)
-* numpy(>=1.10.4)
-* scikit-learn(>=0.17.1)
+* scipy(>=0.18.1)
+* numpy(>=1.11.2)
+* scikit-learn(>=0.18.1)
+
+Additionally, to run the examples, you need matplotlib(>=2.0.0).
 
 Installation
-------------
+~~~~~~~~~~~~
 
-imbalanced-learn is currently available on the PyPi's reporitories and you can install it via `pip`::
+imbalanced-learn is currently available on the PyPi's repository and you can
+install it via `pip`::
 
   pip install -U imbalanced-learn
 
@@ -66,33 +76,60 @@ The package is release also in Anaconda Cloud platform::
 
   conda install -c glemaitre imbalanced-learn
 
-If you prefer, you can clone it and run the setup.py file. Use the following commands to get a 
-copy from Github and install all dependencies::
+If you prefer, you can clone it and run the setup.py file. Use the following
+commands to get a copy from GitHub and install all dependencies::
 
   git clone https://github.com/scikit-learn-contrib/imbalanced-learn.git
   cd imbalanced-learn
-  python setup.py install
+  pip install .
 
 Testing
--------
+~~~~~~~
 
 After installation, you can use `nose` to run the test suite::
 
   make coverage
 
+Development
+-----------
+
+The development of this scikit-learn-contrib is in line with the one
+of the scikit-learn community. Therefore, you can refer to their
+`Development Guide
+<http://scikit-learn.org/stable/developers/index.html>`_.
+
 About
-=====
+-----
 
-Most classification algorithms will only perform optimally when the number of samples of each class is roughly the same. Highly skewed datasets, where the minority is heavily outnumbered by one or more classes, have proven to be a challenge while at the same time becoming more and more common.
+If you use imbalanced-learn in a scientific publication, we would appreciate
+citations to the following paper::
 
-One way of addresing this issue is by re-sampling the dataset as to offset this imbalance with the hope of arriving at a more robust and fair decision boundary than you would otherwise.
+  @article{JMLR:v18:16-365,
+  author  = {Guillaume  Lema{{\^i}}tre and Fernando Nogueira and Christos K. Aridas},
+  title   = {Imbalanced-learn: A Python Toolbox to Tackle the Curse of Imbalanced Datasets in Machine Learning},
+  journal = {Journal of Machine Learning Research},
+  year    = {2017},
+  volume  = {18},
+  number  = {17},
+  pages   = {1-5},
+  url     = {http://jmlr.org/papers/v18/16-365.html}
+  }
+
+Most classification algorithms will only perform optimally when the number of
+samples of each class is roughly the same. Highly skewed datasets, where the
+minority is heavily outnumbered by one or more classes, have proven to be a
+challenge while at the same time becoming more and more common.
+
+One way of addressing this issue is by re-sampling the dataset as to offset this
+imbalance with the hope of arriving at a more robust and fair decision boundary
+than you would otherwise.
 
 Re-sampling techniques are divided in two categories:
     1. Under-sampling the majority class(es).
     2. Over-sampling the minority class.
     3. Combining over- and under-sampling.
     4. Create ensemble balanced sets.
-    
+
 Below is a list of the methods currently implemented in this module.
 
 * Under-sampling
@@ -123,11 +160,10 @@ Below is a list of the methods currently implemented in this module.
     1. EasyEnsemble [13]_
     2. BalanceCascade [13]_
 
-The different algorithms are presented in the following notebook_.
+The different algorithms are presented in the sphinx-gallery_.
 
-.. _notebook: https://github.com/scikit-learn-contrib/imbalanced-learn/blob/master/examples/plot_unbalanced_dataset.ipynb
+.. _sphinx-gallery: http://contrib.scikit-learn.org/imbalanced-learn/auto_examples/index.html
 
-This is a work in progress. Any comments, suggestions or corrections are welcome.
 
 References:
 -----------
